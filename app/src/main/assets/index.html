@@ -1,154 +1,140 @@
 <!doctype html>
-<html lang="pt-BR">
-<head>
-<meta charset="utf-8">
+<html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Teste da mira</title>
 <style>
-html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}
-canvas{position:fixed;inset:0;width:100%;height:100%;pointer-events:none}
-#status{position:fixed;left:6px;top:6px;padding:3px 6px;border-radius:6px;
-background:rgba(0,0,0,.55);color:#fff;font:11px sans-serif}
-#notice{position:fixed;left:6px;top:28px;padding:3px 6px;border-radius:6px;display:none;
-background:rgba(0,90,0,.75);color:#fff;font:11px sans-serif}
-</style>
-</head>
-<body>
+html,body{margin:0;background:#1c1c1c;color:#eee;font:14px sans-serif}
+#bar{padding:8px 10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+button{font:inherit;padding:6px 10px}
+canvas{display:block;width:100%;touch-action:none;background:#0b5d3b}
+#info{padding:6px 10px}
+</style></head><body>
+<div id="bar"><button id="shuffle">Embaralhar bolas</button><span>Arraste na mesa para mirar</span></div>
 <canvas id="c"></canvas>
-<div id="status">Detectando mesa...</div>
-<div id="notice"></div>
+<div id="info"></div>
 <script>
-const c=document.getElementById("c"),ctx=c.getContext("2d"),st=document.getElementById("status"),nt=document.getElementById("notice");
-// Se a linha de previsão sair do lado ERRADO (para trás do taco), troque para true.
-const INVERT_AIM=false;
-// Espessura das linhas: na imagem analisada (800px de largura) precisa ficar < 3px.
-let LW=2;
-let state={table:null,balls:[],pockets:[],aim:null};
-const COL={cue:"#50dcff",eight:"#c8c8c8",solid:"#ffd23c",stripe:"#ff5ad2",unknown:"#ffffff"};
-const NAME={cue:"branca",eight:"8",solid:"lisa",stripe:"listrada",unknown:"?"};
-function resize(){c.width=innerWidth;c.height=innerHeight;LW=Math.min(2,2.4*innerWidth/800);draw()}
-addEventListener("resize",resize);
-window.updateDetectedState=function(s){state=s||state;draw()};
-// Mesa não encontrada neste quadro: limpa o desenho e mostra o motivo vindo do detector.
-window.updateDetectFailure=function(why){state={table:null,balls:[],pockets:[],aim:null};draw();st.textContent="Mesa não encontrada: "+why};
-let noticeTimer=0;
-window.showNotice=function(msg){
-  nt.textContent=msg;nt.style.display="block";
-  clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>{nt.style.display="none"},5000);
-};
+// aim.js — previsão de tacada para o SEU jogo (física ideal: sem atrito, sem efeito).
+// Você entrega as posições que o seu motor já tem; nada de ler a tela.
+//
+//   cue      {x,y}            bola branca
+//   dir      {x,y}            direção da tacada (unitária)
+//   balls    [{x,y,...}]      demais bolas (sem a branca)
+//   B        {l,t,r,b}        limites do CENTRO das bolas (borda interna da mesa menos R)
+//   pockets  [{x,y,r}]        caçapas
+//   R        raio da bola
 
-function norm(x,y){const m=Math.hypot(x,y)||1;return{x:x/m,y:y/m}}
+function norm(x, y) { const m = Math.hypot(x, y) || 1; return { x: x / m, y: y / m }; }
 
-// Traça uma bola a partir de p0 na direção d0. Para ao: bater em outra bola, cair na caçapa,
-// acabar o comprimento, ou depois de `bounces` tabelas.
-function trace(p0,d0,others,pockets,B,maxLen,bounces){
-  const p={x:Math.min(B.r,Math.max(B.l,p0.x)),y:Math.min(B.b,Math.max(B.t,p0.y))};
-  const d={x:d0.x,y:d0.y};
-  const pts=[{x:p.x,y:p.y}];
-  let len=0,hit=null,pocket=null;
-  for(let i=0;i<=bounces&&len<maxLen-1;i++){
-    let sw=Infinity,axis="";
-    if(d.x>1e-6){const s=(B.r-p.x)/d.x;if(s<sw){sw=s;axis="x"}}
-    else if(d.x<-1e-6){const s=(B.l-p.x)/d.x;if(s<sw){sw=s;axis="x"}}
-    if(d.y>1e-6){const s=(B.b-p.y)/d.y;if(s<sw){sw=s;axis="y"}}
-    else if(d.y<-1e-6){const s=(B.t-p.y)/d.y;if(s<sw){sw=s;axis="y"}}
-    sw=Math.max(0,sw);
-    let sb=Infinity,hb=null;
-    for(const o of others){
-      const fx=o.x-p.x,fy=o.y-p.y,proj=fx*d.x+fy*d.y;
-      if(proj<=0)continue;
-      const rr=o.rr,perp2=fx*fx+fy*fy-proj*proj;
-      if(perp2>=rr*rr)continue;
-      const s=proj-Math.sqrt(rr*rr-perp2);
-      if(s>=0&&s<sb){sb=s;hb=o}
+// Anda a partir de `start` na direção `dir`. Para ao bater em outra bola, cair na caçapa
+// ou depois de `maxBounces` tabelas. `ignore` = bolas que não contam como obstáculo.
+function trace(start, dir, ignore, balls, B, pockets, R, maxBounces) {
+  const p = { x: start.x, y: start.y }, d = { x: dir.x, y: dir.y };
+  const pts = [{ x: p.x, y: p.y }];
+  for (let i = 0; i <= maxBounces; i++) {
+    let sw = Infinity, axis = "";
+    if (d.x > 1e-9) { sw = (B.r - p.x) / d.x; axis = "x"; }
+    else if (d.x < -1e-9) { sw = (B.l - p.x) / d.x; axis = "x"; }
+    if (d.y > 1e-9) { const s = (B.b - p.y) / d.y; if (s < sw) { sw = s; axis = "y"; } }
+    else if (d.y < -1e-9) { const s = (B.t - p.y) / d.y; if (s < sw) { sw = s; axis = "y"; } }
+    sw = Math.max(0, sw);
+
+    let sb = Infinity, hb = null;
+    for (const o of balls) {
+      if (ignore.includes(o)) continue;
+      const fx = o.x - p.x, fy = o.y - p.y, proj = fx * d.x + fy * d.y;
+      if (proj <= 0) continue;
+      const perp2 = fx * fx + fy * fy - proj * proj;
+      if (perp2 >= 4 * R * R) continue;
+      const s = proj - Math.sqrt(4 * R * R - perp2);
+      if (s >= 0 && s < sb) { sb = s; hb = o; }
     }
-    const rem=maxLen-len;
-    let kind="end",seg=rem;
-    if(hb&&sb<=sw&&sb<=rem){kind="hit";seg=sb}
-    else if(sw<=rem){kind="wall";seg=sw}
-    // caçapa mais próxima ao longo do trecho
-    let pq=null,pt=Infinity;
-    for(const q of pockets){
-      const t=Math.max(0,Math.min(seg,(q.x-p.x)*d.x+(q.y-p.y)*d.y));
-      if(Math.hypot(p.x+d.x*t-q.x,p.y+d.y*t-q.y)<q.r&&t<pt){pt=t;pq=q}
+    const seg = Math.min(sw, sb);
+
+    for (const q of pockets) {
+      const t = Math.max(0, Math.min(seg, (q.x - p.x) * d.x + (q.y - p.y) * d.y));
+      if (Math.hypot(p.x + d.x * t - q.x, p.y + d.y * t - q.y) < q.r) {
+        pts.push({ x: p.x + d.x * t, y: p.y + d.y * t });
+        return { pts, pocket: q, d };
+      }
     }
-    if(pq){pts.push({x:p.x+d.x*pt,y:p.y+d.y*pt});pocket=pq;break}
-    p.x+=d.x*seg;p.y+=d.y*seg;len+=seg;
-    pts.push({x:p.x,y:p.y});
-    if(kind==="hit"){hit=hb;break}
-    if(kind==="wall"){if(axis==="x")d.x=-d.x;else d.y=-d.y;continue}
-    break;
+    p.x += d.x * seg; p.y += d.y * seg;
+    pts.push({ x: p.x, y: p.y });
+    if (hb && sb <= sw) return { pts, hit: hb, d };
+    if (axis === "x") d.x = -d.x; else d.y = -d.y;     // rebate na tabela
   }
-  return{pts,hit,pocket,d};
+  return { pts, d };
 }
 
-function line(pts,color,dash){
-  ctx.save();ctx.lineWidth=LW;ctx.strokeStyle=color;ctx.setLineDash(dash?[8,6]:[]);
+function predict(cue, dir, balls, B, pockets, R, opts = {}) {
+  const targetBounces = opts.targetBounces ?? 8;      // "linha infinita": quantas tabelas seguir
+  const r1 = trace(cue, dir, [], balls, B, pockets, R, 2);
+  if (r1.pocket) return { cuePts: r1.pts, scratch: true };
+  if (!r1.hit) return { cuePts: r1.pts };
+
+  const target = r1.hit, contact = r1.pts[r1.pts.length - 1];
+  const n = norm(target.x - contact.x, target.y - contact.y);   // sentido da bola atingida
+
+  // trajetória da bola atingida
+  const r2 = trace(target, n, [target], balls, B, pockets, R, targetBounces);
+
+  // desvio da branca (regra dos 90°)
+  const dot = r1.d.x * n.x + r1.d.y * n.y;
+  const tx = r1.d.x - dot * n.x, ty = r1.d.y - dot * n.y, tm = Math.hypot(tx, ty);
+  const r3 = tm > 0.05 ? trace(contact, { x: tx / tm, y: ty / tm }, [target], balls, B, pockets, R, 1) : null;
+
+  return {
+    cuePts: r1.pts, contact, target,
+    targetPts: r2.pts, targetPocket: r2.pocket || null, targetHitsBall: r2.hit || null,
+    cueAfterPts: r3 ? r3.pts : null, cueAfterPocket: r3 ? r3.pocket || null : null,
+  };
+}
+
+// ---------- mesa de teste (substitua pelos dados do seu jogo) ----------
+const c=document.getElementById("c"),ctx=c.getContext("2d"),info=document.getElementById("info");
+const W=Math.min(innerWidth,900),H=Math.round(W/2),R=W*0.016,M=W*0.05;
+c.width=W;c.height=H;c.style.height=H+"px";
+const B={l:M+R,t:M+R,r:W-M-R,b:H-M-R};
+const pockets=[[M,M],[W/2,M-R*0.4],[W-M,M],[M,H-M],[W/2,H-M+R*0.4],[W-M,H-M]].map(([x,y])=>({x,y,r:R*1.9}));
+let cue={x:W*0.25,y:H/2},balls=[],aim={x:1,y:0};
+function shuffle(){
+  balls=[];
+  for(let i=0;i<7;i++){
+    for(let t=0;t<50;t++){
+      const b={x:W*0.45+Math.random()*W*0.45,y:B.t+Math.random()*(B.b-B.t)};
+      if(balls.every(o=>Math.hypot(o.x-b.x,o.y-b.y)>R*2.3)){balls.push(b);break}
+    }
+  }
+  draw();
+}
+function dot(x,y,r,col){ctx.fillStyle=col;ctx.beginPath();ctx.arc(x,y,r,0,7);ctx.fill()}
+function line(pts,col,dash){
+  ctx.save();ctx.strokeStyle=col;ctx.lineWidth=2;ctx.setLineDash(dash?[8,6]:[]);
   ctx.beginPath();pts.forEach((q,i)=>i?ctx.lineTo(q.x,q.y):ctx.moveTo(q.x,q.y));ctx.stroke();ctx.restore();
 }
-function ring(x,y,r,color){ctx.save();ctx.lineWidth=LW;ctx.strokeStyle=color;ctx.beginPath();ctx.arc(x,y,r,0,6.2832);ctx.stroke();ctx.restore()}
-function label(x,y,txt,color){ctx.save();ctx.font="bold 13px sans-serif";ctx.fillStyle=color;ctx.fillText(txt,x+8,y-8);ctx.restore()}
-
-function predict(balls,R,W,H){
-  const t=state.table,cue=balls.find(b=>b.type==="cue");
-  if(!cue)return"sem bola branca";
-  if(!state.aim)return"taco não detectado";
-  const B={l:t.left*W+R,r:t.right*W-R,t:t.top*H+R,b:t.bottom*H-R};
-  const P=(state.pockets||[]).map(q=>({x:q.x*W,y:q.y*H,r:q.r*W*0.85}));
-  const others=balls.filter(b=>b!==cue).map(b=>({...b,rr:2*R}));
-  const s=INVERT_AIM?-1:1;
-  const im=state.img||{w:W,h:H};
-  // dx,dy estão em pixels da imagem analisada; o canvas pode ter outra proporção -> normaliza e reescala
-  const d0=norm((state.aim.dx/im.w)*W*s,(state.aim.dy/im.h)*H*s);
-  const tableW=(t.right-t.left)*W;
-  const r1=trace(cue,d0,others,P,B,tableW*1.6,2);
-  line(r1.pts,"#ffffff",true);
-  if(r1.pocket){ring(r1.pocket.x,r1.pocket.y,r1.pocket.r,"#ff4040");return"⚠ branca cai na caçapa"}
-  if(!r1.hit)return"sem contato (só tabela)";
-  const o=r1.hit,cp=r1.pts[r1.pts.length-1];
-  ring(cp.x,cp.y,R,"#ffffff");                       // posição da branca no contato
-  const n=norm(o.x-cp.x,o.y-cp.y);
-  const cosv=Math.max(0,r1.d.x*n.x+r1.d.y*n.y);
-  const base=tableW*0.6;
-  // bola alvo sai pela linha dos centros
-  // linha "infinita": só para em outra bola, caçapa ou após 8 tabelas
-  const r2=trace(o,n,others.filter(b=>b!==o),P,B,1e5,8);
-  line(r2.pts,COL[o.type]||"#fff",false);
-  const e2=r2.pts[r2.pts.length-1];ring(e2.x,e2.y,R*0.6,COL[o.type]||"#fff");
-  // branca desvia pela tangente (regra dos 90°, sem efeito/atrito)
-  const tx=r1.d.x-cosv*n.x,ty=r1.d.y-cosv*n.y,tm=Math.hypot(tx,ty);
-  if(tm>0.08){
-    const r3=trace(cp,{x:tx/tm,y:ty/tm},others.filter(b=>b!==o),P,B,base*tm,1);
-    line(r3.pts,"#50dcff",true);
-    if(r3.pocket){ring(r3.pocket.x,r3.pocket.y,r3.pocket.r,"#ff4040")}
-  }
-  if(r2.pocket){ring(r2.pocket.x,r2.pocket.y,r2.pocket.r,"#40ff70");label(r2.pocket.x,r2.pocket.y,"caçapa!","#40ff70");return`bola ${NAME[o.type]} → CAÇAPA`}
-  return`bate na ${NAME[o.type]} (não encaçapa)`;
-}
-
 function draw(){
-  ctx.clearRect(0,0,c.width,c.height);
-  if(!state.table){st.textContent="Detectando mesa...";return}
-  const W=c.width,H=c.height;
-  // Linhas finas (2px): o detector as ignora (exige >=3px de espessura), então não viram "bolas/taco".
-  ctx.lineWidth=LW;
-  ctx.strokeStyle="rgba(255,220,50,.8)";
-  for(const p of state.pockets||[]){ctx.beginPath();ctx.arc(p.x*W,p.y*H,p.r*W,0,6.2832);ctx.stroke()}
-  const n={cue:0,eight:0,solid:0,stripe:0,unknown:0};
-  const balls=[];
-  for(const b of state.balls||[]){
-    n[b.type]=(n[b.type]||0)+1;
-    ctx.strokeStyle=COL[b.type]||"#fff";
-    ctx.beginPath();ctx.arc(b.x*W,b.y*H,Math.max(4,b.r*W)*1.4+3,0,6.2832);ctx.stroke();
-    balls.push({x:b.x*W,y:b.y*H,r:b.r*W,type:b.type});
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle="#3a2412";ctx.fillRect(0,0,W,H);
+  ctx.fillStyle="#0b5d3b";ctx.fillRect(M,M,W-2*M,H-2*M);
+  pockets.forEach(q=>dot(q.x,q.y,q.r*0.8,"#000"));
+  balls.forEach(b=>dot(b.x,b.y,R,"#ffd23c"));
+  dot(cue.x,cue.y,R,"#fff");
+  const r=predict(cue,aim,balls,B,pockets,R);
+  line(r.cuePts,"#fff",true);
+  let msg="sem contato";
+  if(r.scratch)msg="a branca cai na caçapa";
+  else if(r.target){
+    ctx.strokeStyle="#fff";ctx.lineWidth=2;ctx.beginPath();ctx.arc(r.contact.x,r.contact.y,R,0,7);ctx.stroke();
+    line(r.targetPts,"#ff5ad2",false);
+    const e=r.targetPts[r.targetPts.length-1];dot(e.x,e.y,R*0.5,"#ff5ad2");
+    if(r.cueAfterPts)line(r.cueAfterPts,"#50dcff",true);
+    msg=r.targetPocket?"a bola atingida cai na caçapa":r.targetHitsBall?"a bola atingida bate em outra bola":"a bola atingida rebate nas tabelas";
   }
-  let msg="";
-  if(balls.length){
-    const rs=balls.map(b=>b.r).sort((a,b)=>a-b),R=rs[rs.length>>1];
-    msg=" • "+predict(balls,R,W,H);
-  }
-  st.textContent=`Mesa OK • branca ${n.cue} • lisas ${n.solid} • listradas ${n.stripe} • 8: ${n.eight}`+(n.unknown?` • ? ${n.unknown}`:"")+msg;
+  info.textContent=msg;
 }
-resize();
-</script>
-</body>
-</html>
+function point(e){const rc=c.getBoundingClientRect();return{x:(e.clientX-rc.left)*W/rc.width,y:(e.clientY-rc.top)*H/rc.height}}
+function setAim(e){const p=point(e);aim=norm(p.x-cue.x,p.y-cue.y);draw()}
+c.addEventListener("pointerdown",e=>{c.setPointerCapture(e.pointerId);setAim(e)});
+c.addEventListener("pointermove",e=>{if(e.buttons)setAim(e)});
+document.getElementById("shuffle").onclick=shuffle;
+shuffle();
+</script></body></html>
