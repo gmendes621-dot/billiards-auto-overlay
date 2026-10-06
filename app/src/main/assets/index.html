@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}
+canvas{position:fixed;inset:0;width:100%;height:100%;pointer-events:none}
+#status{position:fixed;left:6px;top:6px;padding:3px 6px;border-radius:6px;
+background:rgba(0,0,0,.55);color:#fff;font:11px sans-serif}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="status">Detectando mesa...</div>
+<script>
+const c=document.getElementById("c"),ctx=c.getContext("2d"),st=document.getElementById("status");
+let state={table:null,balls:[],pockets:[]};
+const COL={cue:"#50dcff",eight:"#c8c8c8",solid:"#ffd23c",stripe:"#ff5ad2",unknown:"#ffffff"};
+function resize(){c.width=innerWidth;c.height=innerHeight;draw()}
+addEventListener("resize",resize);
+window.updateDetectedState=function(s){state=s||state;draw()};
+function draw(){
+  ctx.clearRect(0,0,c.width,c.height);
+  if(!state.table){st.textContent="Detectando mesa...";return}
+  // Anéis finos e afastados da bola: o detector os ignora (não viram "bolas" falsas).
+  ctx.lineWidth=2;
+  ctx.strokeStyle="rgba(255,220,50,.8)";
+  for(const p of state.pockets||[]){ctx.beginPath();ctx.arc(p.x*c.width,p.y*c.height,p.r*c.width,0,6.2832);ctx.stroke()}
+  const n={cue:0,eight:0,solid:0,stripe:0,unknown:0};
+  for(const b of state.balls||[]){
+    n[b.type]=(n[b.type]||0)+1;
+    ctx.strokeStyle=COL[b.type]||"#fff";
+    ctx.beginPath();ctx.arc(b.x*c.width,b.y*c.height,Math.max(4,b.r*c.width)*1.4+3,0,6.2832);ctx.stroke();
+  }
+  st.textContent=`Mesa OK • branca ${n.cue} • lisas ${n.solid} • listradas ${n.stripe} • 8: ${n.eight}`+(n.unknown?` • ? ${n.unknown}`:"");
+}
+resize();
+</script>
+</body>
+</html>
