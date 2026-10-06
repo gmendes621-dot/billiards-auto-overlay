@@ -8,13 +8,16 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent
 canvas{position:fixed;inset:0;width:100%;height:100%;pointer-events:none}
 #status{position:fixed;left:6px;top:6px;padding:3px 6px;border-radius:6px;
 background:rgba(0,0,0,.55);color:#fff;font:11px sans-serif}
+#notice{position:fixed;left:6px;top:28px;padding:3px 6px;border-radius:6px;display:none;
+background:rgba(0,90,0,.75);color:#fff;font:11px sans-serif}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="status">Detectando mesa...</div>
+<div id="notice"></div>
 <script>
-const c=document.getElementById("c"),ctx=c.getContext("2d"),st=document.getElementById("status");
+const c=document.getElementById("c"),ctx=c.getContext("2d"),st=document.getElementById("status"),nt=document.getElementById("notice");
 // Se a linha de previsão sair do lado ERRADO (para trás do taco), troque para true.
 const INVERT_AIM=false;
 let state={table:null,balls:[],pockets:[],aim:null};
@@ -23,6 +26,13 @@ const NAME={cue:"branca",eight:"8",solid:"lisa",stripe:"listrada",unknown:"?"};
 function resize(){c.width=innerWidth;c.height=innerHeight;draw()}
 addEventListener("resize",resize);
 window.updateDetectedState=function(s){state=s||state;draw()};
+// Mesa não encontrada neste quadro: limpa o desenho e mostra o motivo vindo do detector.
+window.updateDetectFailure=function(why){state={table:null,balls:[],pockets:[],aim:null};draw();st.textContent="Mesa não encontrada: "+why};
+let noticeTimer=0;
+window.showNotice=function(msg){
+  nt.textContent=msg;nt.style.display="block";
+  clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>{nt.style.display="none"},5000);
+};
 
 function norm(x,y){const m=Math.hypot(x,y)||1;return{x:x/m,y:y/m}}
 

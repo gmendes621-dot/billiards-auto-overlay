@@ -7,6 +7,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -48,32 +49,62 @@ data class DetectionResult(
 class BallDetector {
     private val hsv = FloatArray(3)
 
+    /** Motivo da última falha, para mostrar no overlay (null se a última análise achou a mesa). */
+    var lastFailure: String? = null
+        private set
+
+    private fun fail(msg: String): DetectionResult? {
+        lastFailure = msg
+        return null
+    }
+
     fun process(image: Image): DetectionResult? {
-        val bmp = imageToBitmap(image) ?: return null
+        val bmp = imageToBitmap(image) ?: return fail("quadro de captura vazio")
         val w = min(800, bmp.width)
         val h = max(1, bmp.height * w / bmp.width)
         val small = if (w == bmp.width) bmp else Bitmap.createScaledBitmap(bmp, w, h, true).also { bmp.recycle() }
         val px = IntArray(w * h)
         small.getPixels(px, 0, w, 0, 0, w, h)
         small.recycle()
+        lastFailure = null
         return analyze(px, w, h)
+            ?: fail("${lastFailure ?: "?"} [captura ${image.width}x${image.height}]")
     }
 
     private fun analyze(px: IntArray, w: Int, h: Int): DetectionResult? {
         // 1) matiz dominante (a mesa é a maior área saturada no centro da tela)
         val hist = FloatArray(36)
+        val hCos = FloatArray(36)
+        val hSin = FloatArray(36)
+        var lit = 0
+        var sampled = 0
         for (y in h / 6 until h * 5 / 6 step 2) for (x in w / 6 until w * 5 / 6 step 2) {
             Color.colorToHSV(px[y * w + x], hsv)
-            if (hsv[1] > 0.25f && hsv[2] > 0.2f) hist[min(35, (hsv[0] / 10f).toInt())] += hsv[1] * hsv[2]
+            sampled++
+            if (hsv[2] > 0.1f) lit++
+            if (hsv[1] > 0.25f && hsv[2] > 0.2f) {
+                val b = min(35, (hsv[0] / 10f).toInt())
+                val wt = hsv[1] * hsv[2]
+                val a = Math.toRadians(hsv[0].toDouble())
+                hist[b] += wt
+                hCos[b] += (cos(a) * wt).toFloat()
+                hSin[b] += (sin(a) * wt).toFloat()
+            }
         }
+        if (lit < sampled * 0.05f) return fail("a tela capturada está preta (o jogo pode estar bloqueando a captura)")
         var bi = 0
         var bv = 0f
         for (i in 0 until 36) {
             val v = hist[(i + 35) % 36] + hist[i] + hist[(i + 1) % 36]
             if (v > bv) { bv = v; bi = i }
         }
-        if (bv <= 0f) return null
-        val feltHue = bi * 10f + 5f
+        if (bv <= 0f) return fail("nenhuma cor saturada no centro da tela (feltro muito cinza/escuro?)")
+        // matiz médio real dentro das 3 faixas vencedoras (o centro da faixa pode errar até 15°)
+        var sc = 0f
+        var ss = 0f
+        for (k in -1..1) { val j = (bi + k + 36) % 36; sc += hCos[j]; ss += hSin[j] }
+        var feltHue = Math.toDegrees(atan2(ss, sc).toDouble()).toFloat()
+        if (feltHue < 0f) feltHue += 360f
 
         // 2) máscara do feltro + limites da mesa
         val felt = BooleanArray(w * h)
@@ -84,17 +115,24 @@ class BallDetector {
             if (dh > 180f) dh = 360f - dh
             if (dh < 22f && hsv[1] > 0.2f && hsv[2] > 0.12f) { felt[y * w + x] = true; rowC[y]++ }
         }
-        val rows = longestRun(rowC, (rowC.max() * 0.4f).toInt(), h / 50) ?: return null
+        val hueTxt = "matiz ${feltHue.toInt()}°"
+        val rows = longestRun(rowC, (rowC.max() * 0.4f).toInt(), h / 50)
+            ?: return fail("feltro ($hueTxt) não forma uma faixa de linhas")
         val top = rows.first
         val bottom = rows.second
         val colC = IntArray(w)
         for (y in top..bottom) for (x in 0 until w) if (felt[y * w + x]) colC[x]++
-        val cols = longestRun(colC, (colC.max() * 0.4f).toInt(), w / 50) ?: return null
+        val cols = longestRun(colC, (colC.max() * 0.4f).toInt(), w / 50)
+            ?: return fail("feltro ($hueTxt) não forma uma faixa de colunas")
         val left = cols.first
         val right = cols.second
         val tw = right - left
         val th = bottom - top
-        if (tw < w * 0.3f || th < 20 || tw.toFloat() / th !in 1.3f..2.6f) return null
+        val box = "$hueTxt, mesa ${tw}x$th de ${w}x$h"
+        if (tw < w * 0.3f) return fail("mesa estreita demais ($box)")
+        if (th < 20) return fail("mesa baixa demais ($box)")
+        val ratio = tw.toFloat() / th
+        if (ratio !in 1.3f..3.2f) return fail("proporção ${"%.2f".format(ratio)} fora de 1.3–3.2 ($box)")
 
         // 3) transformada de distância dos pixels "não feltro" dentro da mesa
         val big = 1e6f
@@ -259,7 +297,7 @@ class BallDetector {
         return if (bs < 0) null else bs to be
     }
 
-    private fun imageToBitmap(image: Image): Bitmap? {
+    fun imageToBitmap(image: Image): Bitmap? {
         val plane = image.planes.firstOrNull() ?: return null
         val rowPadding = plane.rowStride - plane.pixelStride * image.width
         val bitmap = Bitmap.createBitmap(

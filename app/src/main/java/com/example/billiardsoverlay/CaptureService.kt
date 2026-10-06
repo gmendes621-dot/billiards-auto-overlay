@@ -1,28 +1,35 @@
 package com.example.billiardsoverlay
 
 import android.app.*
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
+import android.graphics.drawable.Icon
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.*
+import android.provider.MediaStore
 import android.provider.Settings
 import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.WindowManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import org.json.JSONObject
+import java.io.File
 
 class CaptureService : Service() {
 
     companion object {
         const val ACTION_START = "START"
         const val ACTION_STOP = "STOP"
+        const val ACTION_SNAPSHOT = "SNAPSHOT"
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_DATA = "result_data"
         private const val CHANNEL_ID = "billiards_capture"
@@ -41,6 +48,7 @@ class CaptureService : Service() {
     private var lastRun = 0L
     private var capW = 0
     private var capH = 0
+    @Volatile private var snapshotRequested = false
 
     override fun onCreate() {
         super.onCreate()
@@ -62,10 +70,31 @@ class CaptureService : Service() {
                 intent.getParcelableExtra(EXTRA_DATA, Intent::class.java)
             else intent.getParcelableExtra(EXTRA_DATA)
             if (data != null && resultCode == Activity.RESULT_OK) startCapture(resultCode, data)
+        } else if (intent?.action == ACTION_SNAPSHOT) {
+            snapshotRequested = true
         } else if (intent?.action == ACTION_STOP) {
             stopSelf()
         }
         return START_NOT_STICKY
+    }
+
+    /** Salva o quadro capturado (o que o detector vê) em Imagens/BilliardsOverlay. Retorna onde salvou. */
+    private fun saveFrame(bmp: Bitmap): String {
+        val name = "mesa_${System.currentTimeMillis()}.png"
+        if (Build.VERSION.SDK_INT >= 29) {
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/BilliardsOverlay")
+            }
+            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                ?: throw IllegalStateException("MediaStore recusou o arquivo")
+            contentResolver.openOutputStream(uri)!!.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            return "Imagens/BilliardsOverlay/$name"
+        }
+        val f = File(getExternalFilesDir(Environment.DIRECTORY_PICTURES), name)
+        f.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        return f.absolutePath
     }
 
     @Suppress("DEPRECATION")
@@ -111,10 +140,23 @@ class CaptureService : Service() {
                     val now = SystemClock.uptimeMillis()
                     if (now - lastRun < MIN_INTERVAL_MS) return@setOnImageAvailableListener
                     lastRun = now
-                    val json = detector?.process(image)?.toJson()
-                    if (json != null) main.post {
-                        webView?.evaluateJavascript("window.updateDetectedState($json);", null)
+                    if (snapshotRequested) {
+                        snapshotRequested = false
+                        val msg = try {
+                            detector?.imageToBitmap(image)?.let { bmp ->
+                                "Quadro salvo em " + saveFrame(bmp).also { bmp.recycle() }
+                            } ?: "Falha ao salvar o quadro"
+                        } catch (e: Exception) {
+                            "Falha ao salvar o quadro: ${e.message}"
+                        }
+                        val q = JSONObject.quote(msg)
+                        main.post { webView?.evaluateJavascript("window.showNotice($q);", null) }
                     }
+                    val det = detector ?: return@setOnImageAvailableListener
+                    val json = det.process(image)?.toJson()
+                    val js = if (json != null) "window.updateDetectedState($json);"
+                    else "window.updateDetectFailure(${JSONObject.quote(det.lastFailure ?: "?")});"
+                    main.post { webView?.evaluateJavascript(js, null) }
                 } finally {
                     image.close()
                 }
@@ -174,11 +216,21 @@ class CaptureService : Service() {
         }
     }
 
-    private fun buildNotification(): Notification =
-        Notification.Builder(this, CHANNEL_ID)
+    private fun buildNotification(): Notification {
+        val snap = PendingIntent.getService(
+            this, 1, Intent(this, CaptureService::class.java).setAction(ACTION_SNAPSHOT),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("Billiards Auto Overlay")
             .setContentText("Analisando a tela para detectar bolas e caçapas")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
+            .addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(this, android.R.drawable.ic_menu_camera), "Salvar quadro", snap
+                ).build()
+            )
             .build()
+    }
 }
