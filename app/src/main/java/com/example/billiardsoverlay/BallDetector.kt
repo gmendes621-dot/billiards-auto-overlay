@@ -5,7 +5,11 @@ import android.graphics.Color
 import android.media.Image
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -14,7 +18,9 @@ data class DetectedObject(val x: Float, val y: Float, val radius: Float, val typ
 
 data class DetectionResult(
     val tableLeft: Float, val tableTop: Float, val tableRight: Float, val tableBottom: Float,
-    val pockets: List<DetectedObject>, val balls: List<DetectedObject>
+    val pockets: List<DetectedObject>, val balls: List<DetectedObject>,
+    // direção da tacada (dx, dy unitário, len = comprimento do taco / largura da imagem); null se não achou o taco
+    val aim: FloatArray? = null
 ) {
     private fun List<DetectedObject>.arr() = JSONArray().also { a ->
         forEach {
@@ -26,7 +32,10 @@ data class DetectionResult(
     fun toJson(): String = JSONObject()
         .put("table", JSONObject().put("left", tableLeft.toDouble()).put("top", tableTop.toDouble())
             .put("right", tableRight.toDouble()).put("bottom", tableBottom.toDouble()))
-        .put("pockets", pockets.arr()).put("balls", balls.arr()).toString()
+        .put("pockets", pockets.arr()).put("balls", balls.arr())
+        .also { j ->
+            aim?.let { j.put("aim", JSONObject().put("dx", it[0].toDouble()).put("dy", it[1].toDouble()).put("len", it[2].toDouble())) }
+        }.toString()
 }
 
 /**
@@ -169,11 +178,72 @@ class BallDetector {
             balls += DetectedObject(cx.toFloat() / w, cy.toFloat() / h, r / w, type, nf.toFloat() / tot)
         }
 
+        // 5) taco -> direção da tacada
+        val cueBall = balls.filter { it.type == "cue" }.maxByOrNull { it.confidence }
+        val aim = cueBall?.let { findAim(felt, w, h, left, top, right, bottom, it) }
+
         val pr = max(2f * med, w * 0.02f) / w
         val pockets = pk.map { DetectedObject(it.first.toFloat() / w, it.second.toFloat() / h, pr, "pocket", 0.6f) }
         return DetectionResult(
-            left.toFloat() / w, top.toFloat() / h, right.toFloat() / w, bottom.toFloat() / h, pockets, balls
+            left.toFloat() / w, top.toFloat() / h, right.toFloat() / w, bottom.toFloat() / h, pockets, balls, aim
         )
+    }
+
+    /**
+     * Acha o taco: lança 720 raios a partir da bola branca e procura o mais longo que passa por pixels
+     * "não feltro" com espessura >= 3px (linhas finas, como as do próprio overlay, são ignoradas).
+     * Retorna a direção da TACADA = oposta à do taco (do taco para a bola).
+     */
+    private fun findAim(felt: BooleanArray, w: Int, h: Int, l: Int, t: Int, r: Int, b: Int, cue: DetectedObject): FloatArray? {
+        val cx = cue.x * w
+        val cy = cue.y * h
+        val rp = cue.radius * w
+        val n = 720
+        val lens = FloatArray(n)
+        val s0 = rp * 1.2f
+        val sMaxStart = rp * 7f
+        fun solid(x: Float, y: Float) = !felt[y.toInt() * w + x.toInt()]
+        for (k in 0 until n) {
+            val a = k * 2.0 * PI / n
+            val dx = cos(a).toFloat()
+            val dy = sin(a).toFloat()
+            var s = s0
+            var first = -1f
+            var last = -1f
+            var gap = 0
+            while (true) {
+                val x = cx + dx * s
+                val y = cy + dy * s
+                if (x < l + 2 || x > r - 2 || y < t + 2 || y > b - 2) break
+                val thick = solid(x, y) && solid(x - dy * 1.2f, y + dx * 1.2f) && solid(x + dy * 1.2f, y - dx * 1.2f)
+                if (thick) {
+                    if (first < 0) first = s
+                    last = s
+                    gap = 0
+                } else {
+                    gap++
+                    if (first < 0 && s > sMaxStart) break
+                    if (first >= 0 && gap > 4) break
+                }
+                s += 1f
+            }
+            lens[k] = if (first < 0) 0f else last - first
+        }
+        var best = 0
+        for (k in 1 until n) if (lens[k] > lens[best]) best = k
+        if (lens[best] < rp * 5f) return null
+        var sx = 0.0
+        var sy = 0.0
+        for (k in 0 until n) {
+            val dk = minOf(abs(k - best), n - abs(k - best))
+            if (dk <= 16 && lens[k] >= lens[best] * 0.85f) {
+                val a = k * 2.0 * PI / n
+                sx += cos(a); sy += sin(a)
+            }
+        }
+        val m = sqrt(sx * sx + sy * sy)
+        if (m < 1e-6) return null
+        return floatArrayOf((-sx / m).toFloat(), (-sy / m).toFloat(), lens[best] / w)
     }
 
     private fun longestRun(c: IntArray, thr: Int, maxGap: Int): Pair<Int, Int>? {
