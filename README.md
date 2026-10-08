@@ -4,7 +4,7 @@ Overlay Android (MediaProjection + WebView) para testar o seu app de sinuca.
 
 - Detecta a cor da mesa automaticamente (qualquer tema).
 - Marca a bola branca (ciano), lisas (amarelo), listradas (rosa) e a 8 (cinza).
-- **Detecta o taco** e desenha a previsão da tacada:
+- **Detecta o taco (preto)** e desenha a previsão da tacada:
   - linha branca tracejada: caminho da branca (com até 2 tabelas) até a primeira bola;
   - círculo branco: onde a branca fica no momento do contato;
   - linha colorida: para onde vai a bola atingida;
@@ -18,7 +18,7 @@ A bola atingida sai pela linha dos centros; a branca sai pela tangente (regra do
 Se o seu jogo tem atrito/efeito, compare a previsão com o resultado real: a diferença mostra o que ajustar no motor.
 
 ## Limitações conhecidas
-- O taco precisa estar visível, ter >= 3px de espessura (na imagem reduzida a 800px) e >= 5 raios de bola dentro da mesa.
+- O taco precisa ser preto (pixels escuros; ajuste `STICK_MAX_V` em `BallDetector.kt` se ele tiver brilho), estar visível, ter >= 3px de espessura (na imagem reduzida a 800px) e >= 5 raios de bola dentro da mesa.
 - Se a linha sair para o lado errado (atrás do taco), mude `INVERT_AIM` para `true` em `assets/index.html`.
 - Bola com a mesma cor da mesa pode não ser detectada.
 - Caçapas são estimadas (cantos e meio das laterais), não detectadas.
