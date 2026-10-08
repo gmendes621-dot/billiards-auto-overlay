@@ -23,7 +23,9 @@ data class DetectionResult(
     // direção da tacada (dx, dy unitário, len = comprimento do taco / largura da imagem); null se não achou o taco
     val aim: FloatArray? = null,
     // tamanho (px) da imagem analisada; o JS precisa dele para converter a direção do taco para o canvas
-    val imgW: Int = 0, val imgH: Int = 0
+    val imgW: Int = 0, val imgH: Int = 0,
+    // traço que o JOGO desenha saindo da bola atingida: [x, y da bola (0–1), dx, dy unitário, len / largura]; null se não achou
+    val trace: FloatArray? = null
 ) {
     private fun List<DetectedObject>.arr() = JSONArray().also { a ->
         forEach {
@@ -39,6 +41,10 @@ data class DetectionResult(
         .put("img", JSONObject().put("w", imgW).put("h", imgH))
         .also { j ->
             aim?.let { j.put("aim", JSONObject().put("dx", it[0].toDouble()).put("dy", it[1].toDouble()).put("len", it[2].toDouble())) }
+            trace?.let {
+                j.put("trace", JSONObject().put("x", it[0].toDouble()).put("y", it[1].toDouble())
+                    .put("dx", it[2].toDouble()).put("dy", it[3].toDouble()).put("len", it[4].toDouble()))
+            }
         }.toString()
 }
 
@@ -54,6 +60,13 @@ class BallDetector {
         // Brilho máximo (0–1) de um pixel do taco. O taco do jogo é preto; se ele tiver reflexo/brilho
         // e não for detectado, suba um pouco (ex.: 0.40).
         const val STICK_MAX_V = 0.30f
+
+        // Traço que o jogo desenha saindo da bola colorida atingida: claro e quase sem cor (branco).
+        // Se o traço não for detectado, DIMINUA TRACE_MIN_V (ex.: 0.50) ou AUMENTE TRACE_MAX_S (ex.: 0.40).
+        // Se estiver pegando coisas que não são o traço, faça o contrário.
+        const val TRACE_MIN_V = 0.62f   // brilho mínimo (0–1)
+        const val TRACE_MAX_S = 0.30f   // saturação máxima (0–1)
+        const val TRACE_MIN_LEN = 1.5f  // comprimento mínimo do traço, em raios da bola
     }
 
     private val hsv = FloatArray(3)
@@ -229,10 +242,13 @@ class BallDetector {
         val cueBall = balls.filter { it.type == "cue" }.maxByOrNull { it.confidence }
         val aim = cueBall?.let { findAim(px, felt, w, h, left, top, right, bottom, it) }
 
+        // 6) traço do jogo saindo da bola colorida atingida -> direção real dela
+        val trace = cueBall?.let { findBallTrace(px, felt, w, h, left, top, right, bottom, balls, it, aim) }
+
         val pr = max(2f * med, w * 0.02f) / w
         val pockets = pk.map { DetectedObject(it.first.toFloat() / w, it.second.toFloat() / h, pr, "pocket", 0.6f) }
         return DetectionResult(
-            left.toFloat() / w, top.toFloat() / h, right.toFloat() / w, bottom.toFloat() / h, pockets, balls, aim, w, h
+            left.toFloat() / w, top.toFloat() / h, right.toFloat() / w, bottom.toFloat() / h, pockets, balls, aim, w, h, trace
         )
     }
 
@@ -301,6 +317,142 @@ class BallDetector {
         val m = sqrt(sx * sx + sy * sy)
         if (m < 1e-6) return null
         return floatArrayOf((-sx / m).toFloat(), (-sy / m).toFloat(), lens[best] / w)
+    }
+
+    /**
+     * Escolhe a bola atingida (a que está na linha da mira; se não houver mira, testa todas as não-brancas)
+     * e devolve o traço que o jogo desenha saindo dela: [x, y da bola (0–1), dx, dy unitário, len / largura].
+     */
+    private fun findBallTrace(
+        px: IntArray, felt: BooleanArray, w: Int, h: Int, l: Int, t: Int, r: Int, b: Int,
+        balls: List<DetectedObject>, cue: DetectedObject, aim: FloatArray?
+    ): FloatArray? {
+        val cx = cue.x * w
+        val cy = cue.y * h
+        var cands = balls.filter { it.type != "cue" }
+        if (aim != null) {
+            val near = cands.filter {
+                val fx = it.x * w - cx
+                val fy = it.y * h - cy
+                val proj = fx * aim[0] + fy * aim[1]
+                val perp = abs(fx * aim[1] - fy * aim[0])
+                proj > 0f && perp < it.radius * w * 3f
+            }
+            if (near.isNotEmpty()) cands = near
+        }
+        var best: FloatArray? = null
+        for (ball in cands) {
+            val tr = traceFromBall(px, felt, w, h, l, t, r, b, ball, cx, cy) ?: continue
+            if (best == null || tr[4] > best[4]) best = tr
+        }
+        return best
+    }
+
+    /**
+     * Lança 720 raios a partir do centro da bola, só para o lado oposto à branca, e procura o mais longo
+     * feito de pixels claros e sem cor (o traço branco do jogo). Depois refina o ângulo ajustando uma reta
+     * aos pixels do traço, para que a extensão até o fim da mesa não se desvie.
+     */
+    private fun traceFromBall(
+        px: IntArray, felt: BooleanArray, w: Int, h: Int, l: Int, t: Int, r: Int, b: Int,
+        ball: DetectedObject, cueX: Float, cueY: Float
+    ): FloatArray? {
+        val bx = ball.x * w
+        val by = ball.y * h
+        val rp = ball.radius * w
+        val ux = bx - cueX
+        val uy = by - cueY
+        val um = hypot(ux, uy)
+        if (um < 1f) return null
+        val hsvL = FloatArray(3)
+        fun lit(x: Float, y: Float): Boolean {
+            val xi = x.toInt()
+            val yi = y.toInt()
+            if (xi < 0 || yi < 0 || xi >= w || yi >= h) return false
+            val i = yi * w + xi
+            if (felt[i]) return false
+            Color.colorToHSV(px[i], hsvL)
+            return hsvL[2] >= TRACE_MIN_V && hsvL[1] <= TRACE_MAX_S
+        }
+        val n = 720
+        val lens = FloatArray(n)
+        val firsts = FloatArray(n)
+        val s0 = rp * 1.25f
+        val sMaxStart = rp * 2.5f
+        for (k in 0 until n) {
+            val a = k * 2.0 * PI / n
+            val dx = cos(a).toFloat()
+            val dy = sin(a).toFloat()
+            if ((dx * ux + dy * uy) / um <= 0f) continue // ignora o lado da branca (linha-guia que chega na bola)
+            var s = s0
+            var first = -1f
+            var last = -1f
+            var gap = 0
+            while (true) {
+                val x = bx + dx * s
+                val y = by + dy * s
+                if (x < l + 2 || x > r - 2 || y < t + 2 || y > b - 2) break
+                // testa o pixel e os dois vizinhos laterais (o traço é fino e pode cair entre dois pixels)
+                if (lit(x, y) || lit(x - dy, y + dx) || lit(x + dy, y - dx)) {
+                    if (first < 0) first = s
+                    last = s
+                    gap = 0
+                } else {
+                    gap++
+                    if (first < 0 && s > sMaxStart) break
+                    if (first >= 0 && gap > 3) break
+                }
+                s += 1f
+            }
+            if (first >= 0) {
+                lens[k] = last - first
+                firsts[k] = first
+            }
+        }
+        var best = 0
+        for (k in 1 until n) if (lens[k] > lens[best]) best = k
+        val bestLen = lens[best]
+        if (bestLen < rp * TRACE_MIN_LEN) return null
+
+        val a0 = best * 2.0 * PI / n
+        val rx = cos(a0).toFloat()
+        val ry = sin(a0).toFloat()
+        // pontos centrais do traço, ao longo do melhor raio
+        val xs = ArrayList<Float>()
+        val ys = ArrayList<Float>()
+        var ps = firsts[best]
+        while (ps <= firsts[best] + bestLen) {
+            var mx = 0f
+            var my = 0f
+            var m = 0
+            for (o in -2..2) {
+                val x = bx + rx * ps - ry * o
+                val y = by + ry * ps + rx * o
+                if (lit(x, y)) { mx += x; my += y; m++ }
+            }
+            if (m > 0) { xs += mx / m; ys += my / m }
+            ps += 1f
+        }
+        var dirX = rx
+        var dirY = ry
+        if (xs.size >= 6) {
+            val mxm = xs.average()
+            val mym = ys.average()
+            var sxx = 0.0
+            var sxy = 0.0
+            var syy = 0.0
+            for (i in xs.indices) {
+                val ex = xs[i] - mxm
+                val ey = ys[i] - mym
+                sxx += ex * ex; sxy += ex * ey; syy += ey * ey
+            }
+            val ang = 0.5 * atan2(2 * sxy, sxx - syy)
+            var fx = cos(ang).toFloat()
+            var fy = sin(ang).toFloat()
+            if (fx * rx + fy * ry < 0f) { fx = -fx; fy = -fy } // sempre apontando para fora da bola
+            if (fx * rx + fy * ry > 0.98f) { dirX = fx; dirY = fy } // só aceita ajuste pequeno (evita ruído)
+        }
+        return floatArrayOf(ball.x, ball.y, dirX, dirY, bestLen / w)
     }
 
     private fun longestRun(c: IntArray, thr: Int, maxGap: Int): Pair<Int, Int>? {
